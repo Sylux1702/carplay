@@ -36,6 +36,7 @@ id getCarplayCADisplay(void)
 
         // Start in landscape
         self.orientation = 3;
+        _inactivityTimer = nil;
 
         self.sessionStatus = objcInvoke([objc_getClass("CARSessionStatus") alloc], @"initForCarPlayShell");
 
@@ -115,6 +116,7 @@ id getCarplayCADisplay(void)
             [self setupDock];
             // Relayout the app view
             [self resizeAppViewForOrientation:_orientation fullscreen:_isFullscreen forceUpdate:YES];
+            [self startInactivityTimer];
         }];
         [_observers addObject:observer];
 
@@ -122,6 +124,9 @@ id getCarplayCADisplay(void)
         id systemGestureManager = objcInvoke(objc_getClass("_UISystemGestureManager"), @"sharedInstance");
         id identity = objcInvoke(objcInvoke(self.rootWindow, @"displayConfiguration"), @"identity");
         objcInvoke_2(systemGestureManager, @"addGestureRecognizer:toDisplayWithIdentity:", _screenTapRecognizer, identity);
+
+        // If dock auto-hide is enabled, start a timer to fire after n seconds of inactivity
+        [self startInactivityTimer];
     }
 
     return self;
@@ -365,6 +370,43 @@ Use this to close the window on the CarPlay screen if the app crashes or is kill
     objcInvoke(self, @"dismiss");
 }
 
+- (void)startInactivityTimer
+{
+    LOG_LIFECYCLE_EVENT;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [self killInactivityTimerIfNeeded];
+
+        // Only start the timer if auto-hide is enabled
+        if ([[CRPreferences sharedInstance] autohideDock])
+        {
+            _inactivityTimer = [NSTimer timerWithTimeInterval:2 target:self selector:@selector(handleInactivity) userInfo:nil repeats:NO];
+            [[NSRunLoop mainRunLoop] addTimer:_inactivityTimer forMode:NSRunLoopCommonModes];
+            [_inactivityTimer retain];
+        }
+    });
+}
+
+- (void)killInactivityTimerIfNeeded
+{
+    LOG_LIFECYCLE_EVENT;
+    if (_inactivityTimer && [_inactivityTimer isKindOfClass:[NSTimer class]])
+    {
+        [_inactivityTimer invalidate];
+        [_inactivityTimer release];
+        _inactivityTimer = nil;
+    }
+}
+
+- (void)handleInactivity
+{
+    LOG_LIFECYCLE_EVENT;
+    // If we're not in fullscreen, and auto-hide is enabled, enter fullscreen
+    if (!_isFullscreen && [[CRPreferences sharedInstance] autohideDock])
+    {
+        [self enterFullscreen];
+    }
+}
+
 - (void)handleScreenTapped
 {
     LOG_LIFECYCLE_EVENT;
@@ -374,6 +416,11 @@ Use this to close the window on the CarPlay screen if the app crashes or is kill
     {
         [self exitFullscreen];
     }
+    else {
+        // Not in fullscreen. To avoid the auto-hide mechanism from triggering while the app is being
+        // interacted with, restart the inactivity timer
+        [self startInactivityTimer];
+    }
 }
 
 - (void)exitFullscreen
@@ -381,7 +428,10 @@ Use this to close the window on the CarPlay screen if the app crashes or is kill
     LOG_LIFECYCLE_EVENT;
     if (_isFullscreen)
     {
+        // Exit fullscreen
         [self resizeAppViewForOrientation:self.orientation fullscreen:NO forceUpdate:NO];
+        // If auto-hide is enabled, restart the inactivity timer
+        [self startInactivityTimer];
     }
 }
 
@@ -408,6 +458,8 @@ When a CarPlay App is closed
     LOG_LIFECYCLE_EVENT;
     // Invalidate the scene monitor
     [self.sceneMonitor invalidate];
+    // Kill the inactivity timer
+    [self killInactivityTimerIfNeeded];
 
     // Remove any observers
     for (id observer in _observers)
